@@ -1,0 +1,30 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# IDE settings
+.vscode/
+.idea/
+
+# Environment variables
+.env
+
+# Logs and Data
+logs/
+data/training/
+*.csv
+*.log
+
+# MPI and Distribution files
+hosts.txt
+
+# OS-specific
+.DS_Store
+Thumbs.db

@@ -1,0 +1,9 @@
+websockets
+binance-connector
+mpi4py
+numpy
+statsmodels
+xgboost
+scikit-learn
+matplotlib
+pandas
