@@ -1,0 +1,6 @@
+{
+  "name": "Flamenco HFT Dashboard",
+  "description": "High-frequency trading dashboard for Flamenco monitoring, MPI topology visualization, and MT5 trade execution.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
