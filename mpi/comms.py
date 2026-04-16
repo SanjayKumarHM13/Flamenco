@@ -5,11 +5,13 @@ import time
 class TradeSignal:
     rank: int
     pair: str
-    z: float
-    signal: int
+    z_score: float
     beta: float
+    variance: float
     spread: float
     half_life: int
-    xgb_prob: float
+    ai_confidence: float
     kelly_size: float
+    price_y: float
+    price_x: float
     timestamp: float = field(default_factory=time.time)

@@ -49,7 +49,7 @@ class PairKalmanFilter:
         self.P = 1.0
         self.is_initialized = True
 
-        logger.info(f"\t[Rank: {self.rank}] Kalman Filter [{self.pair_name}] initialized with OLS Beta: {self.beta:.4f}")
+        logger.info(f"\t[RANK {self.rank}] Kalman Filter [{self.pair_name}] initialized with OLS Beta: {self.beta:.4f}")
 
     def update(self, price_x, price_y, timestamp):
         """
@@ -57,7 +57,7 @@ class PairKalmanFilter:
         Y is the dependent variable, X is the independent variable (Y = βX).
         """
         if not self.is_initialized:
-            raise RuntimeError(f"[Rank: {self.rank}] Kalman Filter for {self.pair_name} not initialized.")
+            raise RuntimeError(f"[RANK {self.rank}] Kalman Filter for {self.pair_name} not initialized.")
         
         # 1. PREDICTION STEP
         # The model assumes the hedge ratio is constant (no drift)
@@ -101,4 +101,4 @@ class PairKalmanFilter:
                 writer = csv.writer(f)
                 writer.writerow([timestamp, self.pair_name, price_y, price_x, round(prior_beta, 6), round(self.beta, 6), round(self.P, 6)])
         except Exception as e:
-            print(f"[Rank: {self.rank}] Kalman Log Error [{self.pair_name}]: {e}")
+            print(f"[RANK {self.rank}] Kalman Log Error [{self.pair_name}]: {e}")

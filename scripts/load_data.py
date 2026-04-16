@@ -1,5 +1,8 @@
-from config import LOOK_AHEAD_BARS
+import sys
 import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from config import LOOK_AHEAD_BARS
 import glob
 import pandas as pd
 import numpy as np
@@ -15,13 +18,14 @@ def generate_training_labels():
     csv_files = glob.glob("logs/worker_*_features.csv")
     if not csv_files:
         return
-    
+
     df_list = [pd.read_csv(f) for f in csv_files]
     df = pd.concat(df_list, ignore_index=True)
 
     # Sorting by pairs and time
     df = df.sort_values(by=['pair', 'timestamp']).reset_index(drop=True)
 
+    logger.info(f"\t[AI Feature Labeling] Total samples: {len(df)}")
     # Defining the "target" 
     df['target'] = 0
 
@@ -45,9 +49,14 @@ def generate_training_labels():
     
     df = df.groupby('pair', group_keys=False).apply(derp_tail)
 
+    logger.info(f"\t[AI Feature Labeling] Total samples after tail removal: {len(df)}")
+
     df_filtered = df[df['z_score'].abs() >= 1.0].copy()
 
     os.makedirs("data/training", exist_ok=True)
     output_path = "data/training/labeled_training_data.csv"
     df_filtered.to_csv(output_path, index=False)
     logger.info(f"\t[AI Feature Labeling] Saved {len(df_filtered)} samples to {output_path}")
+
+if __name__ == "__main__":
+    generate_training_labels()

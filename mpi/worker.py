@@ -4,7 +4,11 @@ import csv
 from statistics import variance
 import requests
 import logging
-from config import SYMBOLS, DEFAULT_HALF_LIFE, KALMAN_Q, KALMAN_R, KELLY_FRACTION
+import pandas as pd
+import xgboost as xgb
+import numpy as np
+
+from config import SYMBOLS, DEFAULT_HALF_LIFE, KALMAN_Q, KALMAN_R, KELLY_FRACTION, MODEL_PATH
 from data.streamer import stream_closed_bars
 from signals.kalman import PairKalmanFilter
 from mpi.comms import TradeSignal
@@ -47,7 +51,7 @@ async def async_worker_engine(comm, rank):
     # In futute, engle-granger test will be used to find pairs.
     my_symbol = SYMBOLS[worker_index*2 : (worker_index*2)+2]
 
-    logger.info(f"\t[Rank: {rank}] My symbols: {my_symbol}")
+    logger.info(f"\t[RANK {rank}] My symbols: {my_symbol}")
 
     if len(my_symbol) != 2:
         logger.info(f"\tRank {rank} idling: Needs exactly 2 symbols to form a pair.")
@@ -57,10 +61,20 @@ async def async_worker_engine(comm, rank):
     pair_name = f"{symbol_y}/{symbol_x}"
 
     # Initializing Kalman Filter
-    logger.info(f"\t[Rank: {rank}] Initializing Kalman Filter for {pair_name}")
+    logger.info(f"\t[RANK {rank}] Initializing Kalman Filter for {pair_name}")
     kf = PairKalmanFilter(rank=rank, pair_name=pair_name, q_variance=KALMAN_Q, r_variance=KALMAN_R)
-    logger.info(f"\t[Rank: {rank}] Initializing Ornstein-Uhlenbeck for {pair_name}")
+    logger.info(f"\t[RANK {rank}] Initializing Ornstein-Uhlenbeck for {pair_name}")
     ou = OrnsteinUhlenbeck(window_size=60)
+    logger.info(f"\t[RANK {rank}] Loading XGBoost Model")
+    ai_model = xgb.XGBClassifier()
+
+    model_loaded = False
+    try:
+        ai_model.load_model(MODEL_PATH)
+        model_loaded = True
+        logger.info(f"\t[RANK {rank}] AI Model loaded successfully.")
+    except Exception as e:
+        logger.error(f"\t[RANK {rank}] CRITICAL: Failed to load AI model: {e}")
 
     try:
         price_y_hist = get_recent_closes(symbol_y, limit=60)
@@ -79,7 +93,7 @@ async def async_worker_engine(comm, rank):
 
     current_bar_prices = {}
 
-    logger.info(f"\t[Rank: {rank}] monitoring Pair: {pair_name}")
+    logger.info(f"\t[RANK {rank}] monitoring Pair: {pair_name}")
 
     # This loop will now only trigger exactly once every 5 minutes per symbol!
     async for closed_bar in stream_closed_bars(rank, my_symbol):
@@ -93,15 +107,31 @@ async def async_worker_engine(comm, rank):
 
             # Updating the Kalman Filter
             posterior_beta, variance = kf.update(price_y, price_x, timestamp)
-
-            logger.info(f"\t[Rank: {rank}] [{pair_name}] Beta updated: {posterior_beta:.4f}")
-            
+            logger.info(f"\t[RANK {rank}] [{pair_name}] Beta updated: {posterior_beta:.4f}")
             # Calculate the current spread: Y - βX
             current_spread = price_y - (posterior_beta * price_x)
 
             # updating the Ornstein-Uhlenbeck Process
             z_score, half_life, p_value = ou.update(current_spread)
-            logger.info(f"\t[Rank: {rank}] [{pair_name}] Z: {z_score:.2f} | HL: {half_life:.1f} | b: {posterior_beta:.4f}")
+            logger.info(f"\t[RANK {rank}] [{pair_name}] Z: {z_score:.2f} | HL: {half_life:.1f} | b: {posterior_beta:.4f}")
+
+            live_feature = pd.DataFrame([{
+                'z_score': z_score,
+                'half_life': half_life,
+                'kalman_variance': variance,
+                'beta': posterior_beta,
+                'spread': current_spread,
+                'p_value': p_value
+            }])
+
+            xgb_prob = 0.5 # Default if model fails
+            if model_loaded:
+                try:
+                    xgb_prob = ai_model.predict_proba(live_feature)[0][1]
+                    logger.info(f"\t[RANK {rank}] [{pair_name}] Z: {z_score:.2f} | HL: {half_life:.1f} | AI Confidence: {xgb_prob*100:.1f}%")
+                except Exception as e:
+                    logger.error(f"\t[RANK {rank}] Prediction error: {e}")
+            
             
             with open(csv_file, mode='a', newline='') as f:
                 writer = csv.writer(f)
@@ -111,20 +141,23 @@ async def async_worker_engine(comm, rank):
                     round(variance, 4), round(posterior_beta, 4),
                     round(current_spread, 4), round(price_y, 4), round(price_x, 4)
                 ])
-            
+
             # --- CREATE SIGNAL ---
-            my_signal = TradeSignal(
+            signal = TradeSignal(
                 rank=rank,
                 pair=pair_name,
-                z=z_score,    
-                signal=1,     # Placeholder 
-                beta=posterior_beta,
+                z_score=round(z_score, 3),
+                beta=round(posterior_beta, 4),
+                variance=round(variance, 6),
                 spread=current_spread,
                 half_life=DEFAULT_HALF_LIFE,
-                xgb_prob=0.88, # Placeholder       
-                kelly_size=KELLY_FRACTION
+                ai_confidence=float(xgb_prob),
+                kelly_size=KELLY_FRACTION,
+                price_y=float(price_y),
+                price_x=float(price_x),
+                timestamp=timestamp
             )
             
             # Sync the cluster and send to master
             comm.barrier()
-            comm.gather(my_signal, root=0)
+            comm.gather(signal, root=0)

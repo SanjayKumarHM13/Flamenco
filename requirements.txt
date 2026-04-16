@@ -1,3 +1,4 @@
+dotenv
 websockets
 binance-connector
 mpi4py
@@ -7,3 +8,7 @@ xgboost
 scikit-learn
 matplotlib
 pandas
+torch
+torchvision
+torchaudio
+MetaTrader5

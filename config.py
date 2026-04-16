@@ -1,4 +1,6 @@
 import os
+import dotenv
+dotenv.load_dotenv()
 
 # ==========================================
 # NETWORK & DATA INGESTION
@@ -33,7 +35,6 @@ SYMBOLS=[
 # ==========================================
 # QUANTITATIVE STRATEGY PARAMETERS
 # ==========================================
-
 # Default fallback values before the AI models warm up
 DEFAULT_HALF_LIFE=45
 DEFAULT_BETA=1.0
@@ -53,17 +54,41 @@ GLOBAL_CIRCUIT_BREAKER=0.05 # Stop trading when the portfolio drops 5% in a day
 # Q: How fast the true hedge ratio is allowed to drift. 
 # Higher = beta adapts faster. Lower = beta is more stable.
 KALMAN_Q=1e-4
-
 # R: How noisy the market observations are. 
 # Higher = trusts the previous beta more. Lower = trusts the new price jump more.
 KALMAN_R=1.0
 
+# ==========================================
+# Ornstein-Uhlenbeck PARAMETERS
+# ==========================================
 OU_WINDOW_SIZE=60
 
-#
- 
+# ==========================================
+# AI DATA TRAINING PARAMETERS
+# ========================================== 
 LOOK_AHEAD_BARS=12
-
-#
-
 TRAINING_DATA_PATH="data/training/labeled_training_data.csv"
+
+# ==========================================
+# AI DATA MODELING PARAMETERS
+# ========================================== 
+MODEL_PATH="models/xgb_model.json"
+MASTER_MODEL_PATH="models/master_lstm_v1.pth"
+SCALER_PATH="models/scaler.pkl"
+
+# ==========================================
+# HYPERPARAMETERS
+# ========================================== 
+SEQUENCE_LENGTH=30
+INPUT_FEATURES=5
+HIDDEN_SIZE=32
+NUM_CLASSES=2
+EPOCHS=10
+
+# ==========================================
+# MT5 CREDENTIALS
+# ========================================== 
+MT5_ACCOUNT = os.getenv("MT5_ACCOUNT")
+MT5_PASSWORD = os.getenv("MT5_PASSWORD")
+MT5_SERVER = os.getenv("MT5_SERVER")
+TOTAL_PORTFOLIO_VALUE = 100000
