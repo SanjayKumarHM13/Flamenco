@@ -1,12 +1,15 @@
 from signals.ou import OrnsteinUhlenbeck
 import os
 import csv
+import json
+import datetime
 from statistics import variance
 import requests
 import logging
 import pandas as pd
 import xgboost as xgb
 import numpy as np
+from websockets.sync.client import connect as ws_connect
 
 from config import SYMBOLS, DEFAULT_HALF_LIFE, KALMAN_Q, KALMAN_R, KELLY_FRACTION, MODEL_PATH
 from data.streamer import stream_closed_bars
@@ -132,7 +135,6 @@ async def async_worker_engine(comm, rank):
                 except Exception as e:
                     logger.error(f"\t[RANK {rank}] Prediction error: {e}")
             
-            
             with open(csv_file, mode='a', newline='') as f:
                 writer = csv.writer(f)
                 writer.writerow([
@@ -157,7 +159,7 @@ async def async_worker_engine(comm, rank):
                 price_x=float(price_x),
                 timestamp=timestamp
             )
-            
+
             # Sync the cluster and send to master
             comm.barrier()
             comm.gather(signal, root=0)

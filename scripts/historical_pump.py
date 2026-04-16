@@ -75,7 +75,60 @@ def get_historical_klines(symbol, interval="1m", days_back=200):
     print(f"Fetched {len(all_closes)} bars for {symbol}.")
     return all_timestamps[-total_bars_needed:], all_closes[-total_bars_needed:]
 
-def run_historical_simulation(pair_name):
+from config import SYMBOLS
+from mpi4py import MPI
+
+def run_mpi_historical_pumps():
+    comm = MPI.COMM_WORLD
+    rank = comm.Get_rank()
+    size = comm.Get_size()
+    
+    pairs = []
+    for i in range(0, len(SYMBOLS), 2):
+        if i + 1 < len(SYMBOLS):
+            pairs.append(f"{SYMBOLS[i]}/{SYMBOLS[i+1]}")
+            
+    # Assign pairs to this rank using round-robin distribution
+    my_pairs = [pairs[i] for i in range(len(pairs)) if i % size == rank]
+    
+    my_temp_files = []
+    for pair_name in my_pairs:
+        print(f"\n[RANK {rank}] Processing Pair: {pair_name}")
+        temp_csv = f"logs/temp_worker_{rank}_{pair_name.replace('/', '_')}.csv"
+        if os.path.exists(temp_csv):
+            os.remove(temp_csv)
+            
+        run_historical_simulation(pair_name, target_csv=temp_csv)
+        my_temp_files.append(temp_csv)
+
+    # Synchronize all processes
+    comm.barrier()
+    all_temp_files = comm.gather(my_temp_files, root=0)
+
+    # Rank 0 consolidates the final CSV
+    if rank == 0:
+        csv_file = "logs/worker_all_pairs.csv"
+        if os.path.exists(csv_file):
+            os.remove(csv_file)
+            
+        _init_logger(csv_file)
+        
+        print("\n[RANK 0] Consolidating worker data into final CSV...")
+        with open(csv_file, 'a', newline='') as outfile:
+            writer = csv.writer(outfile)
+            
+            for temp_list in all_temp_files:
+                for temp_file in temp_list:
+                    if os.path.exists(temp_file):
+                        with open(temp_file, 'r') as infile:
+                            reader = csv.reader(infile)
+                            for row in reader:
+                                writer.writerow(row)
+                        os.remove(temp_file)
+                        
+        print(f"[RANK 0] Simulation Complete! Consolidated data into {csv_file}")
+
+def run_historical_simulation(pair_name, target_csv):
     print("="*50)
     print(f" Starting Historical Pump for {pair_name}")
     print("="*50)
@@ -87,57 +140,39 @@ def run_historical_simulation(pair_name):
     times_x, closes_x = get_historical_klines(symbol_x)
 
     if len(closes_y) < 60 or len(closes_x) < 60:
-        print("Error: Not enough data fetched. Exiting.")
+        print(f"Error: Not enough data for {pair_name}. Skipping.")
         return
     
-    # Ensure the arrays are the exact same length (aligning timestamps)
-    # If one coin listed later than another, this prevents a crash.
     min_len = min(len(closes_y), len(closes_x))
     closes_y = closes_y[-min_len:]
     closes_x = closes_x[-min_len:]
-    times = times_y[-min_len:] # Assume timestamps match closely enough for 5m bars
+    times = times_y[-min_len:]
     
     # 2. Setup the Math Engine
-    # We use rank=99 so it doesn't overwrite a live worker's log if you are running it
     kf = PairKalmanFilter(rank=99, pair_name=pair_name, q_variance=1e-4, r_variance=1.0)
     ou = OrnsteinUhlenbeck(window_size=60)
     
-    # 3. Setup the Output CSV
-    os.makedirs("logs", exist_ok=True)
-    csv_file = f"logs/worker_99_features.csv"
-    
-    # Write the header
-    _init_logger(csv_file)
-        
-    print("\nPumping data through Kalman & OU Models. This may take a minute...")
-    
-    # 4. The Simulation Loop
-    # We need the first 60 bars just to "warm up" the OLS baseline
+    # 3. Baseline Warmup
     price_y_warmup = closes_y[:60]
     price_x_warmup = closes_x[:60]
     kf.initialize_ols(price_y_warmup, price_x_warmup)
     
-    # Warmup OU
     historical_spreads = [y - (kf.beta * x) for y, x in zip(price_y_warmup, price_x_warmup)]
     ou.warmup(historical_spreads)
     
     rows_written = 0
     
-    # Now loop through the remaining 8,500+ bars as if it were a live WebSocket feed
+    # 4. Simulation Loop
     for i in range(60, len(closes_y)):
         py = closes_y[i]
         px = closes_x[i]
         ts = times[i]
         
-        # Step A: Update Kalman
         posterior_beta, variance = kf.update(py, px, ts)
         current_spread = py - (posterior_beta * px)
-        
-        # Step B: Update OU (Add ADF and is_hl_valid if you implemented them)
         z_score, half_life, p_value = ou.update(current_spread)
         
-        # Step C: Save to CSV
-        with open(csv_file, mode='a', newline='') as f:
+        with open(target_csv, mode='a', newline='') as f:
             writer = csv.writer(f)
             writer.writerow([
                 ts, pair_name, 
@@ -147,9 +182,7 @@ def run_historical_simulation(pair_name):
             ])
             rows_written += 1
             
-    print(f"Simulation Complete! Generated {rows_written} feature rows.")
-    print(f"Data saved to: {csv_file}")
+    print(f"Pair {pair_name} Complete! Generated {rows_written} feature rows.")
 
 if __name__ == "__main__":
-    # Test it with one pair first
-    run_historical_simulation("BTCUSDT/ETHUSDT")
+    run_mpi_historical_pumps()

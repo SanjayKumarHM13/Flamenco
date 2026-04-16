@@ -19,17 +19,32 @@ HIST_INTERVAL="5m"
 # ==========================================
 # Add as many pairs as you want here. 
 # The engine will automatically distribute them across available CPU cores.
-SYMBOLS=[
-    "BTCUSDT",
+SYMBOLS = [
+    # Worker 0 (Index 0, 1): The Market Leaders
+    # Highest macro correlation in the market.
+    "BTCUSDT", 
     "ETHUSDT",
-    "SOLUSDT",
-    "BNBUSDT",
-    "XRPUSDT",
-    "DOGEUSDT",
-    "ADAUSDT",
+    
+    # Worker 1 (Index 2, 3): The High-Speed Alt-L1s
+    # Direct competitors; they share the same narrative and institutional capital flows.
+    "SOLUSDT", 
     "AVAXUSDT",
+    
+    # Worker 2 (Index 4, 5): The Academic/Legacy L1s
+    # Older generation, research-heavy protocols that often move in tandem.
+    "ADAUSDT", 
     "DOTUSDT",
-    "MATICUSDT"
+    
+    # Worker 3 (Index 6, 7): The Utility/Ecosystem Tokens
+    # Binance's native coin and Polygon's scaling token; both heavily tied to network activity.
+    "BNBUSDT", 
+    "MATICUSDT",
+    
+    # Worker 4 (Index 8, 9): The Retail Darlings
+    # The weakest structural pair in this list, but both are highly liquid assets 
+    # heavily driven by retail sentiment and payment narratives.
+    "XRPUSDT", 
+    "DOGEUSDT"
 ]
 
 # ==========================================
@@ -53,7 +68,7 @@ GLOBAL_CIRCUIT_BREAKER=0.05 # Stop trading when the portfolio drops 5% in a day
 # ==========================================
 # Q: How fast the true hedge ratio is allowed to drift. 
 # Higher = beta adapts faster. Lower = beta is more stable.
-KALMAN_Q=1e-4
+KALMAN_Q=1e-5
 # R: How noisy the market observations are. 
 # Higher = trusts the previous beta more. Lower = trusts the new price jump more.
 KALMAN_R=1.0

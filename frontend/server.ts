@@ -59,62 +59,31 @@ let equityHistory: EquityPoint[] = Array.from({ length: 50 }, (_, i) => ({
 }));
 
 const state: {
-  ticker: { g_conf: number; pos: number; pnl: number; pairs: Record<string, TickerData> };
-  system: SystemUpdateData;
+  ticker: { g_conf: number; pos: number; pnl: number; pairs: Record<string, TickerData> } | null;
+  system: SystemUpdateData | null;
   logs: LogEventData[];
 } = {
   ticker: {
-    g_conf: 0.74,
-    pos: 2,
-    pnl: 184.20,
-    pairs: {
-      "BTC/ETH": { 
-        z: -2.41, spread: -142.3, sig: "Long" as const, xgb: 0.71, k: 0.18, pnl: 97.40,
-        p_trend: Array.from({ length: 20 }, () => Math.random() * 0.1),
-        beta_var: 0.002,
-        features: { "Z-Score": 0.4, "VIX": 0.2, "Volume": 0.15, "Momentum": 0.25 }
-      },
-      "BTC/SOL": { 
-        z: 2.09, spread: 88.7, sig: "Short" as const, xgb: 0.63, k: 0.14, pnl: 56.80,
-        p_trend: Array.from({ length: 20 }, () => Math.random() * 0.1),
-        beta_var: 0.003,
-        features: { "Z-Score": 0.35, "VIX": 0.25, "Volume": 0.1, "Momentum": 0.3 }
-      },
-      "ETH/SOL": { 
-        z: 0.45, spread: 12.1, sig: "Flat" as const, xgb: 0.48, k: 0.0, pnl: 30.00,
-        p_trend: Array.from({ length: 20 }, () => Math.random() * 0.1),
-        beta_var: 0.001,
-        features: { "Z-Score": 0.2, "VIX": 0.3, "Volume": 0.2, "Momentum": 0.3 }
-      }
-    }
+    g_conf: 0.0,
+    pos: 0,
+    pnl: 0.0,
+    pairs: {}
   },
   system: {
-    circuit_breaker: { status: "Armed", used: 0.4 },
+    circuit_breaker: { status: "Pending Sync", used: 0 },
     nodes: {
-      "Rank0": { role: "Master", host: "Laptop A", cpu: 8, ram: 290, status: "Online" as const },
-      "Rank1": { role: "Worker", host: "Node B", cpu: 12, ram: 410, status: "Online" as const, pair: "BTC/ETH" },
-      "Rank2": { role: "Worker", host: "Node C", cpu: 15, ram: 380, status: "Online" as const, pair: "BTC/SOL" },
-      "Rank3": { role: "Worker", host: "Node D", cpu: 9, ram: 310, status: "Online" as const, pair: "ETH/SOL" }
+      "Rank0": { role: "Master", host: "Master Node", cpu: 0, ram: 0, status: "Offline" as const }
     },
-    pair_stats: {
-      "BTC/ETH": { beta: 0.842, halfLife: 14, trades: "12W / 4L" },
-      "BTC/SOL": { beta: 1.125, halfLife: 22, trades: "8W / 6L" },
-      "ETH/SOL": { beta: 0.654, halfLife: 18, trades: "5W / 2L" }
-    },
+    pair_stats: {},
     lstm: {
-      regime: "MEAN_REVERTING" as RegimeState,
-      confidence: 0.88,
-      heatmap: Array.from({ length: 7 }, () => Array.from({ length: 60 }, () => Math.random()))
+      regime: "MEAN_REVERTING",
+      confidence: 0.0,
+      heatmap: Array.from({ length: 7 }, () => Array.from({ length: 60 }, () => 0))
     },
-    meta_allocations: [
-      { pair: "BTC/ETH", prob: 0.82, allocated: true, kelly: 0.18 },
-      { pair: "BTC/SOL", prob: 0.74, allocated: true, kelly: 0.14 },
-      { pair: "ETH/SOL", prob: 0.45, allocated: false, kelly: 0.0 }
-    ]
+    meta_allocations: []
   },
   logs: [
-    { t: new Date().toISOString(), msg: "System initialized. MPI cluster online.", type: "system" as const },
-    { t: new Date().toISOString(), msg: "LSTM Regime: MEAN_REVERTING detected (conf: 0.88)", type: "ai" as const }
+    { t: new Date().toISOString(), msg: "Waiting for first tick via MPI Gather. Depending on the Binance timeframe, this takes 1 interval...", type: "system" as const }
   ]
 };
 
@@ -166,44 +135,43 @@ async function startServer() {
             data: { pair, status: "success", ticket: Math.floor(Math.random() * 100000), execution_price: 65000 }
           });
         }, 800);
+      } else if (msg.action === "backend_update") {
+        // Python backend sending data — deep-merge so each worker's pair is preserved
+        if (msg.payload.ticker && state.ticker) {
+          state.ticker = {
+            ...state.ticker,
+            ...msg.payload.ticker,
+            pairs: { ...state.ticker.pairs, ...msg.payload.ticker.pairs }
+          };
+          broadcast({ type: "ticker_update", data: state.ticker });
+        }
+        if (msg.payload.system && state.system) {
+          const incoming = msg.payload.system;
+          const existingAllocs = state.system.meta_allocations.filter(
+            (a: any) => !incoming.meta_allocations.find((b: any) => b.pair === a.pair)
+          );
+          state.system = {
+            ...state.system,
+            ...incoming,
+            nodes: { ...state.system.nodes, ...incoming.nodes },
+            pair_stats: { ...state.system.pair_stats, ...incoming.pair_stats },
+            meta_allocations: [...existingAllocs, ...incoming.meta_allocations]
+          };
+          broadcast({ type: "system_update", data: state.system });
+        }
+        if (msg.payload.log) {
+          state.logs.unshift(msg.payload.log);
+          broadcast({ type: "log_event", data: msg.payload.log });
+        }
+        if (msg.payload.equity) {
+          equityHistory.push(msg.payload.equity);
+          broadcast({ type: "equity_update", data: msg.payload.equity });
+        }
       }
     });
   });
 
-  // --- Simulation Loops ---
-  setInterval(() => {
-    // Fast tick: Update prices/z-scores
-    Object.keys(state.ticker.pairs).forEach(pair => {
-      const p = state.ticker.pairs[pair as keyof typeof state.ticker.pairs];
-      p.z += (Math.random() - 0.5) * 0.2;
-      p.spread += (Math.random() - 0.5) * 5;
-      p.pnl += (Math.random() - 0.5) * 2;
-      p.p_trend.push(Math.random() * 0.1);
-      p.p_trend.shift();
-    });
-    state.ticker.pnl = Object.values(state.ticker.pairs).reduce((acc, p) => acc + p.pnl, 0);
-    
-    broadcast({ type: "ticker_update", data: state.ticker });
-  }, 1000);
-
-  setInterval(() => {
-    // Slow tick: Update system state
-    state.system.circuit_breaker.used = Math.min(1, state.system.circuit_breaker.used + (Math.random() - 0.5) * 0.05);
-    
-    const regimes: any[] = ["MEAN_REVERTING", "TRENDING", "UNSTABLE"];
-    if (Math.random() > 0.8) {
-      state.system.lstm.regime = regimes[Math.floor(Math.random() * regimes.length)];
-      state.system.lstm.confidence = 0.6 + Math.random() * 0.3;
-    }
-
-    // Update heatmap
-    state.system.lstm.heatmap.forEach(row => {
-      row.push(Math.random());
-      row.shift();
-    });
-
-    broadcast({ type: "system_update", data: state.system });
-  }, 10000);
+  // --- Simulation Loops removed due to python connection ---
 
   // --- Vite Integration ---
   if (process.env.NODE_ENV !== "production") {

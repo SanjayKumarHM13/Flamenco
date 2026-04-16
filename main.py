@@ -27,6 +27,10 @@ class RegimeLSTM(nn.Module):
         out = self.fc(out)
         return out
 
+import json
+from websockets.sync.client import connect
+import datetime
+
 def calculate_kelly_size(ai_confidence, win_loss_ratio=1.0, safety_fraction=0.5):
     """
     Calculates the percentage of the total portfolio to risk on a single pair.
@@ -55,6 +59,53 @@ def calculate_kelly_size(ai_confidence, win_loss_ratio=1.0, safety_fraction=0.5)
 
 def master_loop(comm):
     logger.info("\t\t[MASTER] Master node initialized. Waiting for signals...")
+
+    ws_conn = None
+    def send_to_frontend(payload):
+        nonlocal ws_conn
+        try:
+            if not ws_conn:
+                ws_conn = connect("ws://127.0.0.1:3000/ws/dashboard")
+            ws_conn.send(json.dumps({"action": "backend_update", "payload": payload}))
+        except Exception as e:
+            logger.error(f"WS error: {e}")
+            ws_conn = None
+
+    def broadcast_ws(current_signals, danger_ratio=0.0, exec_orders=None, is_danger=False, status_override=None):
+        if exec_orders is None: exec_orders = {}
+        pairs_dict = {}
+        now_iso = datetime.datetime.now().isoformat() + "Z"
+        
+        for sig in current_signals:
+            if sig is not None:
+                d = "Flat"
+                if sig.z_score > 2.0: d = "Short"
+                elif sig.z_score < -2.0: d = "Long"
+                pairs_dict[sig.pair] = {
+                    "z": float(sig.z_score), "spread": float(sig.spread), "sig": d,
+                    "xgb": float(sig.ai_confidence), "k": exec_orders.get(sig.pair, 0.0),
+                    "pnl": 0.0, "p_trend": [0.0]*20, "beta_var": float(sig.variance),
+                    "features": {"Z-Score": abs(sig.z_score), "AI Conf": sig.ai_confidence}
+                }
+                if status_override is None:
+                    send_to_frontend({"log": {"t": now_iso, "msg": f"[{sig.pair}] Z: {sig.z_score:5.2f} | AI: {sig.ai_confidence*100:05.2f}%", "type": "ai"}})
+                    
+        ticker_data = {"g_conf": float(1.0 - danger_ratio), "pos": len(exec_orders), "pnl": 0.0, "pairs": pairs_dict}
+        regime = "MEAN_REVERTING" if status_override == "WARMING" else ("TRENDING" if is_danger else "MEAN_REVERTING")
+        sys_data = {
+            "circuit_breaker": {"status": "Armed", "used": 0.0},
+            "nodes": {"Rank0": {"role": "Master", "host": "Master Node", "cpu": 8, "ram": 290, "status": "Online"}},
+            "pair_stats": {},
+            "lstm": {"regime": regime, "confidence": float(1.0 - danger_ratio), "heatmap": [[0.0]*60]*7},
+            "meta_allocations": []
+        }
+        for i, sig in enumerate(current_signals):
+            if sig is not None:
+                sys_data["nodes"][f"Rank{sig.rank}"] = {"role": "Worker", "pair": sig.pair, "host": f"Node {sig.rank}", "cpu": 4, "ram": 256, "status": "Online"}
+                sys_data["meta_allocations"].append({"pair": sig.pair, "prob": float(sig.ai_confidence), "allocated": sig.pair in exec_orders, "kelly": exec_orders.get(sig.pair, 0.0)})
+                sys_data["pair_stats"][sig.pair] = {"beta": float(sig.beta), "halfLife": int(sig.half_life), "trades": "Active" if sig.pair in exec_orders else "Watching"}
+        
+        send_to_frontend({"ticker": ticker_data, "system": sys_data, "equity": {"t": now_iso, "balance": TOTAL_PORTFOLIO_VALUE}})
 
     logger.info("\t\t[MASTER] Loading LSTM Model...")
     device = torch.device("cpu") # Keep inference on CPU to avoid MPI/CUDA conflicts
@@ -100,6 +151,7 @@ def master_loop(comm):
             if not is_warmed_up:
                 current_bars = len(list(market_memory.values())[0]) if market_memory else 0
                 logger.info(f"\t\t[MASTER] Master is warming up memory buffer... ({current_bars/SEQUENCE_LENGTH})")
+                broadcast_ws(signals, status_override="WARMING")
                 continue
             
             # ==========================================
@@ -215,6 +267,9 @@ def master_loop(comm):
                     )
             
             print("="*60)
+
+            # --- WebSocket Sync to Frontend ---
+            broadcast_ws(signals, danger_ratio=danger_ratio, exec_orders=execution_orders, is_danger=is_global_danger)
 
         except Exception as e:
             logger.error(f"\t[MASTER] Master loop error: {e}")
