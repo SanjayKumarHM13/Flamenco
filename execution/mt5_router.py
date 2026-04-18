@@ -26,14 +26,23 @@ class MT5Router:
     def _place_market_order(self, symbol, order_type, volume):
         """Internal helper to format the strict MT5 order dictionary."""
         # Ensure the symbol is visible in the Market Watch
-        if not mt5.symbol_select(symbol, True):
-            print(f"Symbol {symbol} not found in Market Watch.")
+        # Common mapping: if BTCUSDT isn't found, try BTCUSD or BTC.
+        search_symbols = [symbol, symbol.replace("USDT", "USD"), symbol.replace("USDT", "")]
+        actual_symbol = None
+        
+        for s in search_symbols:
+            if mt5.symbol_select(s, True):
+                actual_symbol = s
+                break
+        
+        if not actual_symbol:
+            print(f"Symbol {symbol} and variants not found in Market Watch. Check MT5 Symbols list.")
             return None
 
         # Get current tick data (needed for pricing)
-        tick = mt5.symbol_info_tick(symbol)
+        tick = mt5.symbol_info_tick(actual_symbol)
         if tick is None:
-            print(f"Failed to get tick data for {symbol}.")
+            print(f"Failed to get tick data for {actual_symbol}. Last error: {mt5.last_error()}")
             return None
 
         # Determine price based on Buy (Ask) or Sell (Bid)
@@ -41,7 +50,7 @@ class MT5Router:
         
         request = {
             "action": mt5.TRADE_ACTION_DEAL,
-            "symbol": symbol,
+            "symbol": actual_symbol,
             "volume": float(volume),
             "type": order_type,
             "price": price,
@@ -75,14 +84,14 @@ class MT5Router:
         
         # 2. Convert Dollars to MT5 Lots (Volume)
         # Note: You may need to multiply by contract size depending on your broker!
-        # For simplicity, assuming 1 Lot = 1 Coin (like standard crypto pairs).
-        # We round to 2 decimal places (standard MT5 micro-lot precision).
         vol_y = round(dollars_y / price_y, 2)
         vol_x = round(dollars_x / price_x, 2)
         
+        print(f"[MT5] Target Volumes: {symbol_y}={vol_y}, {symbol_x}={vol_x}")
+
         # Prevent zero-lot errors
         if vol_y <= 0 or vol_x <= 0:
-            print("Trade size too small to meet minimum lot requirements. Skipping.")
+            print(f"[MT5] Trade size too small for ${total_dollar_risk:.2f} risk. ({vol_y}, {vol_x}). Increase TOTAL_PORTFOLIO_VALUE in config.py.")
             return
 
         print(f"\nExecuting Spread: {pair_name} | Total AI Allocation: ${total_dollar_risk:.2f}")

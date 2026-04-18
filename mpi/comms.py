@@ -1,5 +1,7 @@
 from dataclasses import dataclass, field
 import time
+import platform
+import os
 
 @dataclass
 class TradeSignal:
@@ -14,4 +16,8 @@ class TradeSignal:
     kelly_size: float
     price_y: float
     price_x: float
+    cpu: float = 0.0
+    ram: float = 0.0
+    cores: int = os.cpu_count() or 1
+    hostname: str = field(default_factory=lambda: platform.node())
     timestamp: float = field(default_factory=time.time)

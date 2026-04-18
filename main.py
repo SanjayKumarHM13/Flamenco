@@ -2,6 +2,9 @@ from mpi4py import MPI
 import asyncio
 from collections import deque
 import logging
+import psutil
+import platform
+import os
 import torch
 import torch.nn as nn
 import pickle
@@ -57,7 +60,7 @@ def calculate_kelly_size(ai_confidence, win_loss_ratio=1.0, safety_fraction=0.5)
     # Ensure we don't return negative sizes
     return max(0.0, max_risk)
 
-def master_loop(comm):
+async def master_loop(comm):
     logger.info("\t\t[MASTER] Master node initialized. Waiting for signals...")
 
     ws_conn = None
@@ -65,10 +68,16 @@ def master_loop(comm):
         nonlocal ws_conn
         try:
             if not ws_conn:
-                ws_conn = connect("ws://127.0.0.1:3000/ws/dashboard")
+                # Disable keepalive pings — MPI blocks prevent responding to them
+                ws_conn = connect("ws://127.0.0.1:3000/ws/dashboard", open_timeout=10, close_timeout=5)
             ws_conn.send(json.dumps({"action": "backend_update", "payload": payload}))
         except Exception as e:
             logger.error(f"WS error: {e}")
+            try:
+                if ws_conn:
+                    ws_conn.close()
+            except:
+                pass
             ws_conn = None
 
     def broadcast_ws(current_signals, danger_ratio=0.0, exec_orders=None, is_danger=False, status_override=None):
@@ -94,16 +103,35 @@ def master_loop(comm):
         regime = "MEAN_REVERTING" if status_override == "WARMING" else ("TRENDING" if is_danger else "MEAN_REVERTING")
         sys_data = {
             "circuit_breaker": {"status": "Armed", "used": 0.0},
-            "nodes": {"Rank0": {"role": "Master", "host": "Master Node", "cpu": 8, "ram": 290, "status": "Online"}},
+            "nodes": {
+                "Rank0": {
+                    "role": "Master", 
+                    "host": platform.node(), 
+                    "cpu": psutil.cpu_percent(), 
+                    "ram": int(psutil.virtual_memory().used / (1024 * 1024)), 
+                    "cores": os.cpu_count() or 1,
+                    "status": "Online"
+                }
+            },
             "pair_stats": {},
             "lstm": {"regime": regime, "confidence": float(1.0 - danger_ratio), "heatmap": [[0.0]*60]*7},
             "meta_allocations": []
         }
         for i, sig in enumerate(current_signals):
             if sig is not None:
-                sys_data["nodes"][f"Rank{sig.rank}"] = {"role": "Worker", "pair": sig.pair, "host": f"Node {sig.rank}", "cpu": 4, "ram": 256, "status": "Online"}
+                sys_data["nodes"][f"Rank{sig.rank}"] = {
+                    "role": "Worker", 
+                    "pair": sig.pair, 
+                    "host": sig.hostname, 
+                    "cpu": sig.cpu, 
+                    "ram": int(sig.ram), 
+                    "cores": sig.cores,
+                    "status": "Online"
+                }
                 sys_data["meta_allocations"].append({"pair": sig.pair, "prob": float(sig.ai_confidence), "allocated": sig.pair in exec_orders, "kelly": exec_orders.get(sig.pair, 0.0)})
                 sys_data["pair_stats"][sig.pair] = {"beta": float(sig.beta), "halfLife": int(sig.half_life), "trades": "Active" if sig.pair in exec_orders else "Watching"}
+        
+        logger.info(f"\t\t[MASTER] Sending data to frontend: {len(current_signals)} signals, {len(sys_data['nodes'])} nodes")
         
         send_to_frontend({"ticker": ticker_data, "system": sys_data, "equity": {"t": now_iso, "balance": TOTAL_PORTFOLIO_VALUE}})
 
@@ -123,14 +151,28 @@ def master_loop(comm):
     router = MT5Router(MT5_ACCOUNT, MT5_PASSWORD, MT5_SERVER)
 
     market_memory = {}
+    latest_signals = {}  # Persistent cache: { pair_name: TradeSignal }
 
     while True:
         try:
-            comm.barrier()
-
-            signals = comm.gather(None, root=0)
+            # 1. Non-blocking check for signals from ANY worker
+            new_signals = []
+            for r in range(1, comm.Get_size()):
+                if comm.Iprobe(source=r):
+                    sig = comm.recv(source=r)
+                    if sig:
+                        new_signals.append(sig)
+                        latest_signals[sig.pair] = sig  # Always keep the latest
             
-            for sig in signals:
+            if not new_signals:
+                await asyncio.sleep(0.1)
+                continue
+
+            # Use the full accumulated view for broadcasting
+            signals = list(latest_signals.values())
+            
+            # Only add NEW data points to market memory (avoid duplicates from cache)
+            for sig in new_signals:
                 if sig is not None:
                     if sig.pair not in market_memory:
                         market_memory[sig.pair] = deque(maxlen=SEQUENCE_LENGTH)
@@ -144,13 +186,17 @@ def master_loop(comm):
                     ]
                     market_memory[sig.pair].append(snapshot)
 
+            if not market_memory:
+                logger.info("\t\t[MASTER] Waiting for first signals from workers...")
+                continue
+
             # Check if Memory is Full (Ready for AI)
             # The Master cannot predict the regime until it has 60 full bars
             is_warmed_up = all(len(dq) == SEQUENCE_LENGTH for dq in market_memory.values())
 
             if not is_warmed_up:
-                current_bars = len(list(market_memory.values())[0]) if market_memory else 0
-                logger.info(f"\t\t[MASTER] Master is warming up memory buffer... ({current_bars/SEQUENCE_LENGTH})")
+                min_bars = min(len(dq) for dq in market_memory.values()) if market_memory else 0
+                logger.info(f"\t\t[MASTER] Warming up: {min_bars}/{SEQUENCE_LENGTH} bars ({len(market_memory)} pairs, {len(signals)} nodes)")
                 broadcast_ws(signals, status_override="WARMING")
                 continue
             
@@ -244,15 +290,12 @@ def master_loop(comm):
                         
                     print(f"[{sig.pair}] Worker XGB: {sig.ai_confidence*100:05.2f}% | Z: {sig.z_score:5.2f} | {status}")
             
-            # ==========================================
-            # FIRE THE ORDERS VIA MT5
-            # ==========================================
             if execution_orders:
-                print("\nROUTING AI TRADES TO METATRADER 5:")
+                logger.info(f"\n[MASTER] ROUTING {len(execution_orders)} AI TRADES TO METATRADER 5 (Capital: ${TOTAL_PORTFOLIO_VALUE})")
                 for pair, pct_size in execution_orders.items():
-                    
                     # 1. Calculate real dollar value based on Kelly percentage
                     capital_to_risk = TOTAL_PORTFOLIO_VALUE * pct_size
+                    logger.info(f"\t -> Pair {pair} | Risk: ${capital_to_risk:.2f} ({pct_size*100:.2f}%)")
                     
                     # 2. Find the specific TradeSignal object for this pair to get prices and Z-score
                     target_signal = next(sig for sig in signals if sig is not None and sig.pair == pair)
@@ -270,10 +313,44 @@ def master_loop(comm):
 
             # --- WebSocket Sync to Frontend ---
             broadcast_ws(signals, danger_ratio=danger_ratio, exec_orders=execution_orders, is_danger=is_global_danger)
+        
 
         except Exception as e:
             logger.error(f"\t[MASTER] Master loop error: {e}")
             break
+
+        import time
+        time.sleep(0.1)
+
+def setup_logging(rank):
+    """Configure per-rank logging to separate files."""
+    import os
+    os.makedirs("logs", exist_ok=True)
+
+    # Clear all existing handlers from root logger
+    root_logger = logging.getLogger()
+    root_logger.handlers.clear()
+    root_logger.setLevel(logging.INFO)
+
+    fmt = logging.Formatter("%(asctime)s | %(name)s | %(message)s", datefmt="%H:%M:%S")
+
+    if rank == 0:
+        log_file = "logs/master.log"
+    else:
+        log_file = f"logs/worker_{rank}.log"
+
+    # File handler (each rank writes to its own file)
+    fh = logging.FileHandler(log_file, mode="w", encoding="utf-8")
+    fh.setLevel(logging.INFO)
+    fh.setFormatter(fmt)
+    root_logger.addHandler(fh)
+
+    # Console handler (keep for master only, suppress workers to avoid interleaving)
+    if rank == 0:
+        ch = logging.StreamHandler()
+        ch.setLevel(logging.INFO)
+        ch.setFormatter(fmt)
+        root_logger.addHandler(ch)
 
 if __name__ == "__main__":
 
@@ -281,7 +358,9 @@ if __name__ == "__main__":
 
 	rank = comm.Get_rank()
 
+	setup_logging(rank)
+
 	if rank == 0:
-		master_loop(comm)
+		asyncio.run(master_loop(comm))
 	else:
 		asyncio.run(async_worker_engine(comm, rank))

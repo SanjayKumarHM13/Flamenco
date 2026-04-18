@@ -20,6 +20,7 @@ export interface NodeData {
   host: string;
   cpu: number;
   ram: number;
+  cores: number;
   status: NodeStatus;
 }
 

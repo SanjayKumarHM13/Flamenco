@@ -30,15 +30,15 @@ SYMBOLS = [
     "SOLUSDT", 
     "AVAXUSDT",
     
-    # Worker 2 (Index 4, 5): The Academic/Legacy L1s
-    # Older generation, research-heavy protocols that often move in tandem.
-    "ADAUSDT", 
-    "DOTUSDT",
-    
     # Worker 3 (Index 6, 7): The Utility/Ecosystem Tokens
     # Binance's native coin and Polygon's scaling token; both heavily tied to network activity.
     "BNBUSDT", 
     "MATICUSDT",
+
+    # Worker 2 (Index 4, 5): The Academic/Legacy L1s
+    # Older generation, research-heavy protocols that often move in tandem.
+    "ADAUSDT", 
+    "DOTUSDT",
     
     # Worker 4 (Index 8, 9): The Retail Darlings
     # The weakest structural pair in this list, but both are highly liquid assets 

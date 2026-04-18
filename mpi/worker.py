@@ -1,8 +1,9 @@
+import asyncio
 from signals.ou import OrnsteinUhlenbeck
 import os
 import csv
-import json
-import datetime
+import threading
+import queue
 from statistics import variance
 import requests
 import logging
@@ -15,6 +16,7 @@ from config import SYMBOLS, DEFAULT_HALF_LIFE, KALMAN_Q, KALMAN_R, KELLY_FRACTIO
 from data.streamer import stream_closed_bars
 from signals.kalman import PairKalmanFilter
 from mpi.comms import TradeSignal
+import psutil
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -157,9 +159,10 @@ async def async_worker_engine(comm, rank):
                 kelly_size=KELLY_FRACTION,
                 price_y=float(price_y),
                 price_x=float(price_x),
+                cpu=psutil.cpu_percent(),
+                ram=int(psutil.virtual_memory().used / (1024 * 1024)),
                 timestamp=timestamp
             )
 
-            # Sync the cluster and send to master
-            comm.barrier()
-            comm.gather(signal, root=0)
+            # Send to master via point-to-point to avoid collective deadlock
+            await asyncio.to_thread(comm.send, signal, dest=0)

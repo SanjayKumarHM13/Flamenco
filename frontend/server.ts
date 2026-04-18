@@ -72,7 +72,7 @@ const state: {
   system: {
     circuit_breaker: { status: "Pending Sync", used: 0 },
     nodes: {
-      "Rank0": { role: "Master", host: "Master Node", cpu: 0, ram: 0, status: "Offline" as const }
+      "Rank0": { role: "Master", host: "Master Node", cpu: 0, ram: 0, cores: 0, status: "Offline" as const }
     },
     pair_stats: {},
     lstm: {
